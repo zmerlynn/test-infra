@@ -25,11 +25,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+const executable = 0111
 
 var httpTransport *http.Transport
 
@@ -45,6 +48,45 @@ func k8s(parts ...string) string {
 		p = append(p, a)
 	}
 	return filepath.Join(p...)
+}
+
+func findKubernetesBinary(binary string) (string, error) {
+	var latest time.Time
+	latestPath := ""
+
+	walk := func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Just ignore anything that doesn't exist.
+		}
+		if !info.Mode().IsRegular() || ((info.Mode() & executable) == 0) {
+			return nil
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+			latestPath = path
+		}
+		return nil
+	}
+
+	for _, path := range []string{
+		k8s("_output", "bin", binary),
+		k8s("_output", "dockerized", "bin", runtime.GOOS, runtime.GOARCH, binary),
+		k8s("_output", "local", "bin", runtime.GOOS, runtime.GOARCH, binary),
+		k8s("platforms", runtime.GOOS, runtime.GOARCH, binary),
+	} {
+		info, err := os.Stat(path)
+		_ = walk(path, info, err)
+	}
+
+	// Also search for binary in bazel build tree. In some cases we
+	// have to name the binary {binary}_bin, since there was a
+	// directory name {binary} next to it.
+	_ = filepath.Walk(k8s("bazel-bin"), walk)
+
+	if latestPath == "" {
+		return "", fmt.Errorf("kubernetes binary %q not found", binary)
+	}
+	return latestPath, nil
 }
 
 // append(errs, err) if err != nil
@@ -331,4 +373,13 @@ func migrateOptions(m []migratedOption) error {
 		}
 	}
 	return nil
+}
+
+// getenvOrDefault returns the environment variable {env} or the
+// default value {def}.
+func getenvOrDefault(env, def string) string {
+	if s := os.Getenv(env); s != "" {
+		return s
+	}
+	return def
 }

@@ -167,7 +167,7 @@ func run(deploy deployer, o options) error {
 					}))
 				} else {
 					errs = appendError(errs, xmlWrap("Test", func() error {
-						return Test(o.testArgs, dump)
+						return TestWithWrapper(o.testArgs, dump)
 					}))
 				}
 			}
@@ -579,7 +579,7 @@ func SkewTest(args, dump string, checkSkew bool) error {
 	))
 }
 
-func Test(testArgs, dump string) error {
+func TestWithWrapper(testArgs, dump string) error {
 	if dump != "" {
 		if pop, err := pushEnv("E2E_REPORT_DIR", dump); err != nil {
 			return err
@@ -588,4 +588,88 @@ func Test(testArgs, dump string) error {
 		}
 	}
 	return finishRunning(exec.Command("./hack/ginkgo-e2e.sh", strings.Fields(testArgs)...))
+}
+
+// Direct test using ginkgo / e2e.go rather than ginkgo-e2e.sh
+func Test(testArgs, dump string) error {
+	ginkgo, err := findKubernetesBinary("ginkgo")
+	if err != nil {
+		return err
+	}
+	e2e, err := findKubernetesBinary("e2e.test")
+	if err != nil {
+		return err
+	}
+
+	// TODO(kubernetes/test-infra#3330): Plumb the test options in
+	// rather than using magic env variables. This is currently ported
+	// almost 1:1 from ginkgo-e2e.sh, but skips everything that
+	// scripts shells out for (e.g. KUBE_MASTER_URL must be set before
+	// this function will work).
+	args := []string{}
+	if skip := os.Getenv("CONFORMANCE_TEST_SKIP_REGEX"); skip != "" {
+		// Fixed seed for conformance tests.
+		// TODO(zmerlynn): Whhhyyyyy?
+		args = append(args, "--skip="+skip, "--seed=1436380640")
+	}
+	if nodes := os.Getenv("GINKGO_PARALLEL_NODES"); nodes != "" {
+		args = append(args, "--nodes="+nodes)
+	} else if parallel := os.Getenv("GINKGO_PARALLEL"); strings.ToLower(parallel) == "y" {
+		args = append(args, "--nodes=25")
+	}
+	if uif := os.Getenv("GINKGO_UNTIL_IT_FAILS"); uif == "true" {
+		args = append(args, "--untilItFails=true")
+	}
+	if tf := os.Getenv("GINKGO_TOLERATE_FLAKES"); tf == "y" {
+		args = append(args, "--ginkgo.flakeAttempts=2")
+	} else {
+		args = append(args, "--ginkgo.flakeAttempts=1")
+	}
+	if uif := os.Getenv("GINKGO_NO_COLOR"); uif == "true" {
+		args = append(args, "--noColor")
+	}
+
+	args = append(args, e2e, "--",
+		"--report-dir="+dump,
+		"--kubeconfig="+os.Getenv("KUBECONFIG"),
+		"--host="+os.Getenv("KUBE_MASTER_URL"),
+		"--provider="+os.Getenv("KUBERNETES_PROVIDER"),
+		"--gce-project="+os.Getenv("PROJECT"),
+		"--gce-zone="+os.Getenv("ZONE"),
+		"--gce-multizone="+getenvOrDefault("MULTIZONE", "false"),
+		"--gke-cluster="+os.Getenv("CLUSTER_NAME"),
+		"--kube-master="+os.Getenv("KUBE_MASTER"),
+		"--cluster-tag="+os.Getenv("CLUSTER_ID"),
+		"--cloud-config-file="+os.Getenv("CLOUD_CONFIG"),
+		"--repo-root="+k8s(),
+		"--node-instance-group="+os.Getenv("NODE_INSTANCE_GROUP"),
+		"--prefix="+getenvOrDefault("KUBE_GCE_INSTANCE_PREFIX", "e2e"),
+		"--network="+getenvOrDefault("KUBE_GCE_NETWORK", getenvOrDefault("KUBE_GKE_NETWORK", "e2e")),
+		"--node-tag="+os.Getenv("NODE_TAG"),
+		"--master-tag="+os.Getenv("MASTER_TAG"),
+		"--federated-kube-context="+getenvOrDefault("FEDERATION_KUBE_CONTEXT", "e2e-federation"))
+	if cr := os.Getenv("KUBE_CONTAINER_RUNTIME"); cr != "" {
+		args = append(args, "--container-runtime="+cr)
+	}
+	if mod := os.Getenv("MASTER_OS_DISTRIBUTION"); mod != "" {
+		args = append(args, "--master-os-distro="+mod)
+	}
+	if nod := os.Getenv("NODE_OS_DISTRIBUTION"); nod != "" {
+		args = append(args, "--node-os-distro="+nod)
+	}
+	if nn := os.Getenv("NUM_NODES"); nn != "" {
+		args = append(args, "--num-nodes="+nn)
+	}
+	if cs := os.Getenv("E2E_CLEAN_START"); cs != "" {
+		args = append(args, "--clean-start=true")
+	}
+	if msp := os.Getenv("E2E_MIN_STARTUP_PODS"); msp != "" {
+		args = append(args, "--minStartupPods="+msp)
+	}
+	if rp := os.Getenv("E2E_REPORT_PREFIX"); rp != "" {
+		args = append(args, "--report-prefix="+rp)
+	}
+	args = append(args, strings.Fields(testArgs)...)
+
+	return finishRunning(exec.Command(ginkgo, args...))
 }
